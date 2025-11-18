@@ -166,27 +166,49 @@ class GeminiLiveClient {
         return new Promise((resolve, reject) => {
             const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${apiKey}`;
 
+            console.log('Connecting to:', wsUrl.replace(apiKey, 'API_KEY_HIDDEN'));
+
             this.ws = new WebSocket(wsUrl);
             this.ws.binaryType = 'arraybuffer';
 
+            // Add timeout for connection
+            const connectionTimeout = setTimeout(() => {
+                if (!this.isConnected) {
+                    console.error('Connection timeout - no setupComplete received');
+                    this.addTranscript('error', 'Connection timeout. Please check your API key and try again.');
+                    reject(new Error('Connection timeout'));
+                    if (this.ws) {
+                        this.ws.close();
+                    }
+                }
+            }, 15000); // 15 second timeout
+
             this.ws.onopen = () => {
-                console.log('WebSocket connected');
+                console.log('WebSocket opened successfully');
+                this.addTranscript('system', 'WebSocket connected, sending setup...');
                 this.sendSetupMessage();
             };
 
             this.ws.onmessage = (event) => {
+                clearTimeout(connectionTimeout);
                 this.handleWebSocketMessage(event.data);
             };
 
             this.ws.onerror = (error) => {
                 console.error('WebSocket error:', error);
+                clearTimeout(connectionTimeout);
+                this.addTranscript('error', 'WebSocket connection failed. Check console for details.');
                 reject(new Error('WebSocket connection failed'));
             };
 
-            this.ws.onclose = () => {
-                console.log('WebSocket closed');
+            this.ws.onclose = (event) => {
+                console.log('WebSocket closed. Code:', event.code, 'Reason:', event.reason);
+                clearTimeout(connectionTimeout);
                 this.isConnected = false;
                 this.updateStatus('Disconnected', 'disconnected');
+                if (event.code !== 1000) {
+                    this.addTranscript('error', `Connection closed unexpectedly. Code: ${event.code}`);
+                }
             };
 
             // Resolve after setup complete
@@ -200,12 +222,12 @@ class GeminiLiveClient {
         const setupMessage = {
             setup: {
                 model: "models/gemini-2.0-flash-exp",
-                generation_config: {
-                    response_modalities: ["AUDIO"],
-                    speech_config: {
-                        voice_config: {
-                            prebuilt_voice_config: {
-                                voice_name: "Puck"
+                generationConfig: {
+                    responseModalities: "audio",
+                    speechConfig: {
+                        voiceConfig: {
+                            prebuiltVoiceConfig: {
+                                voiceName: "Puck"
                             }
                         }
                     }
@@ -214,12 +236,12 @@ class GeminiLiveClient {
         };
 
         if (systemInstruction) {
-            setupMessage.setup.system_instruction = {
+            setupMessage.setup.systemInstruction = {
                 parts: [{ text: systemInstruction }]
             };
         }
 
-        console.log('Sending setup message:', setupMessage);
+        console.log('Sending setup message:', JSON.stringify(setupMessage, null, 2));
         this.ws.send(JSON.stringify(setupMessage));
     }
 
@@ -228,8 +250,19 @@ class GeminiLiveClient {
             const message = JSON.parse(data);
             console.log('Received message:', message);
 
+            // Handle errors from server
+            if (message.error) {
+                console.error('Server error:', message.error);
+                this.addTranscript('error', `Server error: ${JSON.stringify(message.error)}`);
+                this.updateStatus('Error', 'disconnected');
+                if (this.setupCompletePromise) {
+                    this.setupCompletePromise.reject(new Error(message.error.message || 'Server error'));
+                }
+                return;
+            }
+
             if (message.setupComplete) {
-                console.log('Setup complete');
+                console.log('Setup complete!');
                 this.isConnected = true;
                 this.updateStatus('Connected', 'connected');
                 this.connectionStatus.textContent = 'Connected';
@@ -255,6 +288,7 @@ class GeminiLiveClient {
 
         } catch (error) {
             console.error('Error handling message:', error);
+            this.addTranscript('error', `Message handling error: ${error.message}`);
         }
     }
 
